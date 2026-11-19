@@ -1,0 +1,994 @@
+-- [[ 核心服務 ]]
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+
+local function getGuiParent()
+    local ok, core = pcall(function() return game:GetService("CoreGui") end)
+    if ok and core then return core end
+    return LocalPlayer:WaitForChild("PlayerGui")
+end
+local GuiParent = getGuiParent()
+
+-- ============================================================
+-- 字體管理
+-- ============================================================
+local FONT_LIST = {
+    { Name = "Michroma",      Family = "Michroma",      Fallback = Enum.Font.Code },
+    { Name = "Gotham",        Family = "Gotham",        Fallback = Enum.Font.Gotham },
+    { Name = "GothamSSm",     Family = "GothamSSm",     Fallback = Enum.Font.GothamSemibold },
+    { Name = "Roboto",        Family = "Roboto",        Fallback = Enum.Font.Roboto },
+    { Name = "RobotoMono",    Family = "RobotoMono",    Fallback = Enum.Font.RobotoMono },
+    { Name = "Oswald",        Family = "Oswald",        Fallback = Enum.Font.Oswald },
+    { Name = "Montserrat",    Family = "Montserrat",    Fallback = Enum.Font.Gotham },
+    { Name = "Nunito",        Family = "Nunito",        Fallback = Enum.Font.Gotham },
+    { Name = "SourceSansPro", Family = "SourceSansPro", Fallback = Enum.Font.SourceSans },
+    { Name = "Bangers",       Family = "Bangers",       Fallback = Enum.Font.Bangers },
+    { Name = "SpecialElite",  Family = "SpecialElite",  Fallback = Enum.Font.SpecialElite },
+    { Name = "LuckiestGuy",   Family = "LuckiestGuy",   Fallback = Enum.Font.LuckiestGuy },
+    { Name = "IndieFlower",   Family = "IndieFlower",   Fallback = Enum.Font.IndieFlower },
+    { Name = "JosefinSans",   Family = "JosefinSans",   Fallback = Enum.Font.Gotham },
+    { Name = "Sarpanch",      Family = "Sarpanch",      Fallback = Enum.Font.Gotham },
+    { Name = "TitilliumWeb",  Family = "TitilliumWeb",  Fallback = Enum.Font.Gotham },
+    { Name = "Code",          Family = nil,             Fallback = Enum.Font.Code },
+    { Name = "Arcade",        Family = nil,             Fallback = Enum.Font.Arcade },
+    { Name = "Fantasy",       Family = nil,             Fallback = Enum.Font.Fantasy },
+    { Name = "Antique",       Family = nil,             Fallback = Enum.Font.Antique },
+    { Name = "SciFi",         Family = nil,             Fallback = Enum.Font.SciFi },
+    { Name = "Cartoon",       Family = nil,             Fallback = Enum.Font.Cartoon },
+}
+
+local function buildFontSpec(entry)
+    if entry.Family then
+        local ok, font = pcall(function()
+            return Font.new("rbxasset://fonts/families/" .. entry.Family .. ".json")
+        end)
+        if ok and font then return { Face = font } end
+    end
+    return { Enum = entry.Fallback }
+end
+
+local env = (getgenv and getgenv()) or _G
+local currentFontName = env.w7w7_SelectedFont or FONT_LIST[1].Name
+local currentFontSpec = nil
+for _, entry in ipairs(FONT_LIST) do
+    if entry.Name == currentFontName then
+        currentFontSpec = buildFontSpec(entry)
+        break
+    end
+end
+if not currentFontSpec then
+    currentFontName = FONT_LIST[1].Name
+    currentFontSpec = buildFontSpec(FONT_LIST[1])
+end
+
+local trackedTextObjects = {}
+local function registerText(obj)
+    if obj and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
+        table.insert(trackedTextObjects, obj)
+    end
+    return obj
+end
+
+local function applyFont(obj, fontSpec)
+    if not obj or not fontSpec then return end
+    if fontSpec.Face then
+        pcall(function() obj.FontFace = fontSpec.Face end)
+    elseif fontSpec.Enum then
+        pcall(function() obj.Font = fontSpec.Enum end)
+    end
+end
+
+local function applyFontToAll()
+    for _, obj in ipairs(trackedTextObjects) do
+        if obj and obj.Parent then
+            applyFont(obj, currentFontSpec)
+        end
+    end
+end
+
+-- ============================================================
+-- 安全實例 + 拖動
+-- ============================================================
+local function new(class, parent, props)
+    local inst = Instance.new(class)
+    if props then
+        for k, v in pairs(props) do
+            pcall(function() inst[k] = v end)
+        end
+    end
+    if parent then inst.Parent = parent end
+    registerText(inst)
+    return inst
+end
+
+local function makeDraggable(frame, dragArea)
+    dragArea = dragArea or frame
+    local dragging, dragStart, startPos
+    dragArea.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+            local conn
+            conn = input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                    if conn then conn:Disconnect() end
+                end
+            end)
+        end
+    end)
+    dragArea.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch then
+            if dragging then
+                local delta = input.Position - dragStart
+                frame.Position = UDim2.new(
+                    startPos.X.Scale, startPos.X.Offset + delta.X,
+                    startPos.Y.Scale, startPos.Y.Offset + delta.Y
+                )
+            end
+        end
+    end)
+end
+
+-- [[ 功能變數 ]]
+local TargetPos = CFrame.new(9000, 9000, 9000)
+local Projectiles = {}
+local currentTarget = nil
+local KickEnabled = false
+local TpEnabled = false
+
+-- TP 黏貼偏移（可調）
+local TpOffset = {
+    Enabled = false,     -- 黏貼模式開關
+    Height = 0,          -- 上下偏移（+頭頂 / -腳下）
+    Forward = 3,         -- 前後偏移（+前 / -後）
+    Right = 0,           -- 左右偏移（+右 / -左）
+    KeepVelocityZero = true, -- 停止速度避免滑走
+}
+
+local YLockEnabled = false
+local lockedY = nil
+local yLastPos = nil
+
+local FastFireEnabled = false
+local FastFireGunRate = 0.001
+local FastFireMeleeRate = 0.001
+
+-- ============================================================
+-- 全遊戲字體替換
+-- ============================================================
+local GameFontEnabled = false
+local gameFontOriginals = setmetatable({}, { __mode = "k" })
+local gameFontSpec = nil
+local gameFontHookConn = nil
+local gameFontLoopRunning = false
+
+local function getGameFontSpec()
+    for _, entry in ipairs(FONT_LIST) do
+        if entry.Name == (env.w7w7_GameFont or "Michroma") then
+            return buildFontSpec(entry)
+        end
+    end
+    return buildFontSpec(FONT_LIST[1])
+end
+
+local ICON_FONT_STR = tostring(Font.new("rbxasset://LuaPackages/Packages/_Index/BuilderIcons/BuilderIcons/BuilderIcons.json"))
+
+local function isIconText(obj)
+    local ok, str = pcall(function() return tostring(obj.FontFace) end)
+    if ok and str then
+        if str == ICON_FONT_STR then return true end
+        if string.find(str, "BuilderIcons") then return true end
+    end
+    return false
+end
+
+local function isOurPanel(obj)
+    return sg and obj:IsDescendantOf(sg)
+end
+
+local function trySetFont(obj)
+    if not (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
+        return false
+    end
+    if isIconText(obj) then return false end
+    if isOurPanel(obj) then return false end
+    local saved = gameFontOriginals[obj]
+    if not saved then
+        saved = { FontFace = obj.FontFace, Font = obj.Font }
+        gameFontOriginals[obj] = saved
+    end
+    local before = tostring(obj.FontFace)
+    if gameFontSpec.Face then
+        pcall(function() obj.FontFace = gameFontSpec.Face end)
+    elseif gameFontSpec.Enum then
+        pcall(function() obj.Font = gameFontSpec.Enum end)
+    end
+    return before ~= tostring(obj.FontFace)
+end
+
+local function restoreGameFont(obj)
+    local saved = gameFontOriginals[obj]
+    if not saved then return end
+    pcall(function() obj.FontFace = saved.FontFace end)
+    pcall(function() obj.Font = saved.Font end)
+    gameFontOriginals[obj] = nil
+end
+
+local function getAllUIRoots()
+    local roots = { game }
+    pcall(function()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if pg then table.insert(roots, pg) end
+    end)
+    pcall(function()
+        local cg = game:GetService("CoreGui")
+        if cg then table.insert(roots, cg) end
+    end)
+    pcall(function()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        local mainGui = pg and pg:FindFirstChild("MainGui")
+        if mainGui then table.insert(roots, mainGui) end
+    end)
+    return roots
+end
+
+local function scanGameFonts()
+    task.spawn(function()
+        local count, changed = 0, 0
+        for _, root in ipairs(getAllUIRoots()) do
+            if not GameFontEnabled then return end
+            local ok, descendants = pcall(function() return root:GetDescendants() end)
+            if ok and descendants then
+                for _, v in ipairs(descendants) do
+                    if not GameFontEnabled then return end
+                    if trySetFont(v) then changed += 1 end
+                    count += 1
+                    if count % 300 == 0 then task.wait() end
+                end
+            end
+        end
+        print(string.format("[w7w7] Game Font scan: %d objects, %d changed", count, changed))
+    end)
+end
+
+local function installGameFontLoop()
+    if gameFontLoopRunning then return end
+    gameFontLoopRunning = true
+    task.spawn(function()
+        while GameFontEnabled do
+            for obj in pairs(gameFontOriginals) do
+                if GameFontEnabled and obj.Parent then
+                    if gameFontSpec.Face then
+                        pcall(function() obj.FontFace = gameFontSpec.Face end)
+                    elseif gameFontSpec.Enum then
+                        pcall(function() obj.Font = gameFontSpec.Enum end)
+                    end
+                end
+            end
+            for _, root in ipairs(getAllUIRoots()) do
+                if not GameFontEnabled then break end
+                local ok, descendants = pcall(function() return root:GetDescendants() end)
+                if ok and descendants then
+                    for _, v in ipairs(descendants) do
+                        if not GameFontEnabled then break end
+                        if not gameFontOriginals[v] then trySetFont(v) end
+                    end
+                end
+            end
+            task.wait(1)
+        end
+        gameFontLoopRunning = false
+    end)
+end
+
+local function enableGameFont()
+    gameFontSpec = getGameFontSpec()
+    GameFontEnabled = true
+    scanGameFonts()
+    if gameFontHookConn then gameFontHookConn:Disconnect() end
+    gameFontHookConn = game.DescendantAdded:Connect(function(obj)
+        if GameFontEnabled then
+            task.defer(function() if GameFontEnabled then trySetFont(obj) end end)
+        end
+    end)
+    installGameFontLoop()
+end
+
+local function disableGameFont()
+    GameFontEnabled = false
+    if gameFontHookConn then gameFontHookConn:Disconnect() gameFontHookConn = nil end
+    for obj in pairs(gameFontOriginals) do restoreGameFont(obj) end
+    table.clear(gameFontOriginals)
+end
+
+-- [[ 清理舊 UI ]]
+do
+    local old = GuiParent:FindFirstChild("w7w7_HVH")
+    if old then old:Destroy() end
+end
+
+-- [[ UI 建立 ]]
+local sg = new("ScreenGui", nil, { Name = "w7w7_HVH", ResetOnSpawn = false })
+sg.Parent = GuiParent
+
+local MainFrame = new("Frame", sg, {
+    Name = "MainFrame",
+    Size = UDim2.new(0, 320, 0, 480),
+    Position = UDim2.new(0.5, -160, 0.4, 0),
+    BackgroundColor3 = Color3.fromRGB(20, 20, 20),
+    BackgroundTransparency = 0.15,
+    BorderSizePixel = 0,
+    Active = true,
+})
+new("UICorner", MainFrame, { CornerRadius = UDim.new(0, 10) })
+makeDraggable(MainFrame, MainFrame)
+
+local RainbowLine = new("Frame", MainFrame, {
+    Size = UDim2.new(1, 0, 0, 3),
+    BorderSizePixel = 0,
+})
+local UIGradient = new("UIGradient", RainbowLine, {
+    Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.new(1,0,0)),
+        ColorSequenceKeypoint.new(0.5, Color3.new(0,1,0)),
+        ColorSequenceKeypoint.new(1, Color3.new(0,0,1)),
+    }),
+})
+
+local Title = new("TextLabel", MainFrame, {
+    Size = UDim2.new(1, 0, 0, 40),
+    Text = "w7w7 HUB : HVH+",
+    TextColor3 = Color3.new(1, 1, 1),
+    TextSize = 20,
+    BackgroundTransparency = 1,
+})
+
+local CloseBtn = new("TextButton", MainFrame, {
+    Size = UDim2.new(0, 25, 0, 25),
+    Position = UDim2.new(1, -35, 0, 8),
+    Text = "×",
+    BackgroundColor3 = Color3.fromRGB(180, 50, 50),
+    TextColor3 = Color3.new(1, 1, 1),
+})
+new("UICorner", CloseBtn, { CornerRadius = UDim.new(0, 6) })
+
+local function NewButton(name, yPos)
+    local Frame = new("Frame", MainFrame, {
+        Size = UDim2.new(0, 150, 0, 35),
+        Position = UDim2.new(0.5, -75, 0, yPos),
+        BackgroundTransparency = 1,
+    })
+    local Ind = new("Frame", Frame, {
+        Size = UDim2.new(0, 8, 0, 8),
+        Position = UDim2.new(0, 0, 0.5, -4),
+        BackgroundColor3 = Color3.fromRGB(150, 0, 0),
+    })
+    new("UICorner", Ind, { CornerRadius = UDim.new(1, 0) })
+    local Btn = new("TextButton", Frame, {
+        Size = UDim2.new(1, -15, 1, 0),
+        Position = UDim2.new(0, 15, 0, 0),
+        BackgroundColor3 = Color3.fromRGB(45, 45, 45),
+        Text = name .. " OFF",
+        TextColor3 = Color3.new(1, 1, 1),
+        TextSize = 14,
+    })
+    new("UICorner", Btn, { CornerRadius = UDim.new(0, 6) })
+    return Btn, Ind
+end
+
+local TPBtn, TPInd             = NewButton("TP", 55)
+local KickBtn, KickInd         = NewButton("KICK", 100)
+local VoidBtn, VoidInd         = NewButton("void", 145)
+local YLockBtn, YLockInd       = NewButton("Y-Lock", 190)
+local FastFireBtn, FastFireInd = NewButton("Fast Fire", 235)
+local GameFontBtn, GameFontInd = NewButton("Game Font", 280)
+
+local VoidEnabled = false
+
+local function UpdateUI(btn, ind, state, name)
+    btn.Text = name .. (state and " ON" or " OFF")
+    ind.BackgroundColor3 = state and Color3.new(0, 1, 0) or Color3.new(0.6, 0, 0)
+end
+
+TPBtn.MouseButton1Click:Connect(function()
+    TpEnabled = not TpEnabled
+    UpdateUI(TPBtn, TPInd, TpEnabled, "TP")
+    if not TpEnabled then currentTarget = nil end
+end)
+
+KickBtn.MouseButton1Click:Connect(function()
+    KickEnabled = not KickEnabled
+    UpdateUI(KickBtn, KickInd, KickEnabled, "KICK")
+end)
+
+YLockBtn.MouseButton1Click:Connect(function()
+    YLockEnabled = not YLockEnabled
+    UpdateUI(YLockBtn, YLockInd, YLockEnabled, "Y-Lock")
+    if not YLockEnabled then lockedY = nil; yLastPos = nil end
+end)
+
+GameFontBtn.MouseButton1Click:Connect(function()
+    if GameFontEnabled then
+        disableGameFont()
+        UpdateUI(GameFontBtn, GameFontInd, false, "Game Font")
+    else
+        enableGameFont()
+        UpdateUI(GameFontBtn, GameFontInd, true, "Game Font")
+    end
+end)
+
+RunService.RenderStepped:Connect(function()
+    local t = tick()
+    UIGradient.Offset = Vector2.new(math.sin(t) * 0.5, 0)
+end)
+
+-- ============================================================
+-- TP 黏貼偏移控制面板（可調）
+-- ============================================================
+local TPOffsetPanel = new("Frame", sg, {
+    Name = "TPOffsetPanel",
+    Size = UDim2.new(0, 220, 0, 240),
+    Position = UDim2.new(0.5, 180, 0.4, 0),
+    BackgroundColor3 = Color3.fromRGB(28, 28, 28),
+    BackgroundTransparency = 0.05,
+    BorderSizePixel = 0,
+    Active = true,
+    Visible = false,
+    ZIndex = 40,
+})
+new("UICorner", TPOffsetPanel, { CornerRadius = UDim.new(0, 8) })
+
+local TPOffsetTitle = new("TextLabel", TPOffsetPanel, {
+    Size = UDim2.new(1, 0, 0, 32),
+    BackgroundColor3 = Color3.fromRGB(45, 45, 45),
+    BorderSizePixel = 0,
+    Text = "TP 黏貼偏移",
+    TextColor3 = Color3.new(1, 1, 1),
+    TextSize = 15,
+    ZIndex = 41,
+})
+new("UICorner", TPOffsetTitle, { CornerRadius = UDim.new(0, 8) })
+makeDraggable(TPOffsetPanel, TPOffsetTitle)
+
+local TPOffsetClose = new("TextButton", TPOffsetPanel, {
+    Size = UDim2.new(0, 25, 0, 25),
+    Position = UDim2.new(1, -30, 0, 4),
+    BackgroundColor3 = Color3.fromRGB(180, 50, 50),
+    Text = "×",
+    TextColor3 = Color3.new(1, 1, 1),
+    TextSize = 14,
+    ZIndex = 42,
+})
+new("UICorner", TPOffsetClose, { CornerRadius = UDim.new(0, 6) })
+TPOffsetClose.MouseButton1Click:Connect(function()
+    TPOffsetPanel.Visible = false
+end)
+
+-- 預設位置按鈕
+local function MakePresetButton(label, text, y, onClick)
+    local btn = new("TextButton", TPOffsetPanel, {
+        Size = UDim2.new(0, 100, 0, 26),
+        Position = UDim2.new(0, 10, 0, y),
+        BackgroundColor3 = Color3.fromRGB(60, 60, 90),
+        Text = label,
+        TextColor3 = Color3.new(1, 1, 1),
+        TextSize = 13,
+        ZIndex = 41,
+    })
+    new("UICorner", btn, { CornerRadius = UDim.new(0, 6) })
+    btn.MouseButton1Click:Connect(onClick)
+    return btn
+end
+
+MakePresetButton("頭頂", "head", 40, function()
+    TpOffset.Height = 2.5
+    TpOffset.Forward = 0
+    TpOffset.Right = 0
+    TpOffset.Enabled = true
+    print("[w7w7] TP 黏在頭頂")
+end)
+
+MakePresetButton("腳下", "below", 72, function()
+    TpOffset.Height = -3
+    TpOffset.Forward = 0
+    TpOffset.Right = 0
+    TpOffset.Enabled = true
+    print("[w7w7] TP 黏在腳下")
+end)
+
+MakePresetButton("前面", "front", 104, function()
+    TpOffset.Height = 0
+    TpOffset.Forward = 3
+    TpOffset.Right = 0
+    TpOffset.Enabled = true
+    print("[w7w7] TP 黏在前面")
+end)
+
+MakePresetButton("後面", "back", 136, function()
+    TpOffset.Height = 0
+    TpOffset.Forward = -3
+    TpOffset.Right = 0
+    TpOffset.Enabled = true
+    print("[w7w7] TP 黏在後面")
+end)
+
+-- 可調 3 個滑桿：高度、前後、左右
+local function MakeSlider(label, y, value, minV, maxV, step, onChange)
+    local lbl = new("TextLabel", TPOffsetPanel, {
+        Size = UDim2.new(1, -20, 0, 14),
+        Position = UDim2.new(0, 10, 0, y),
+        BackgroundTransparency = 1,
+        Text = label,
+        TextColor3 = Color3.new(1, 1, 1),
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 41,
+    })
+    local valLbl = new("TextLabel", TPOffsetPanel, {
+        Size = UDim2.new(0, 40, 0, 14),
+        Position = UDim2.new(1, -50, 0, y),
+        BackgroundTransparency = 1,
+        Text = string.format("%.1f", value),
+        TextColor3 = Color3.fromRGB(0, 255, 180),
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        ZIndex = 41,
+    })
+    local track = new("TextButton", TPOffsetPanel, {
+        Size = UDim2.new(1, -20, 0, 8),
+        Position = UDim2.new(0, 10, 0, y + 16),
+        BackgroundColor3 = Color3.fromRGB(50, 50, 50),
+        Text = "",
+        ZIndex = 41,
+    })
+    new("UICorner", track, { CornerRadius = UDim.new(1, 0) })
+    local fill = new("Frame", track, {
+        Size = UDim2.new(0.5, 0, 1, 0),
+        BackgroundColor3 = Color3.fromRGB(0, 140, 60),
+        BorderSizePixel = 0,
+        ZIndex = 41,
+    })
+    new("UICorner", fill, { CornerRadius = UDim.new(1, 0) })
+
+    local dragging = false
+    local function update(xPos)
+        local t = math.clamp((xPos - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+        local v = minV + (maxV - minV) * t
+        v = math.floor(v / step + 0.5) * step
+        fill.Size = UDim2.new(t, 0, 1, 0)
+        valLbl.Text = string.format("%.1f", v)
+        onChange(v)
+    end
+    track.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            update(input.Position.X)
+        end
+    end)
+    track.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    track.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            update(input.Position.X)
+        end
+    end)
+    return track
+end
+
+MakeSlider("高度 (上下)", 180, TpOffset.Height, -5, 5, 0.1, function(v)
+    TpOffset.Height = v
+end)
+MakeSlider("前後 (Forward)", 220, TpOffset.Forward, -5, 5, 0.1, function(v)
+    TpOffset.Forward = v
+end)
+MakeSlider("左右 (Right)", 260, TpOffset.Right, -5, 5, 0.1, function(v)
+    TpOffset.Right = v
+end)
+
+-- TP 偏移按鈕（在主面板底部）
+local TPOffsetBtn = new("TextButton", MainFrame, {
+    Size = UDim2.new(0, 150, 0, 28),
+    Position = UDim2.new(0.5, -75, 0, 320),
+    BackgroundColor3 = Color3.fromRGB(60, 60, 90),
+    Text = "TP 黏貼設定",
+    TextColor3 = Color3.new(1, 1, 1),
+    TextSize = 13,
+})
+new("UICorner", TPOffsetBtn, { CornerRadius = UDim.new(0, 6) })
+TPOffsetBtn.MouseButton1Click:Connect(function()
+    TPOffsetPanel.Visible = not TPOffsetPanel.Visible
+    if TPOffsetPanel.Visible then
+        local mx = MainFrame.AbsolutePosition.X
+        local my = MainFrame.AbsolutePosition.Y
+        TPOffsetPanel.Position = UDim2.fromOffset(mx + 330, my)
+    end
+end)
+
+-- ============================================================
+-- 字體選擇面板（獨立浮動視窗）
+-- ============================================================
+local FontPanel = new("Frame", sg, {
+    Name = "FontPanel",
+    Size = UDim2.new(0, 200, 0, 320),
+    Position = UDim2.new(0.5, 170, 0.4, 0),
+    BackgroundColor3 = Color3.fromRGB(28, 28, 28),
+    BackgroundTransparency = 0.05,
+    BorderSizePixel = 0,
+    Active = true,
+    Visible = false,
+    ZIndex = 20,
+})
+new("UICorner", FontPanel, { CornerRadius = UDim.new(0, 8) })
+
+local FontTitle = new("TextLabel", FontPanel, {
+    Size = UDim2.new(1, 0, 0, 32),
+    BackgroundColor3 = Color3.fromRGB(45, 45, 45),
+    BorderSizePixel = 0,
+    Text = "字體選擇",
+    TextColor3 = Color3.new(1, 1, 1),
+    TextSize = 15,
+    ZIndex = 21,
+})
+new("UICorner", FontTitle, { CornerRadius = UDim.new(0, 8) })
+makeDraggable(FontPanel, FontTitle)
+
+local FontCloseBtn = new("TextButton", FontPanel, {
+    Size = UDim2.new(0, 25, 0, 25),
+    Position = UDim2.new(1, -30, 0, 4),
+    BackgroundColor3 = Color3.fromRGB(180, 50, 50),
+    Text = "×",
+    TextColor3 = Color3.new(1, 1, 1),
+    TextSize = 14,
+    ZIndex = 22,
+})
+new("UICorner", FontCloseBtn, { CornerRadius = UDim.new(0, 6) })
+FontCloseBtn.MouseButton1Click:Connect(function() FontPanel.Visible = false end)
+
+local FontScroll = new("ScrollingFrame", FontPanel, {
+    Size = UDim2.new(1, -12, 1, -80),
+    Position = UDim2.new(0, 6, 0, 38),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 6,
+    CanvasSize = UDim2.new(0, 0, 0, 0),
+    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    ZIndex = 21,
+})
+new("UIListLayout", FontScroll, {
+    Padding = UDim.new(0, 4),
+    SortOrder = Enum.SortOrder.LayoutOrder,
+})
+
+local fontButtons = {}
+local function refreshFontButtonColors()
+    for name, btn in pairs(fontButtons) do
+        if name == currentFontName then
+            btn.BackgroundColor3 = Color3.fromRGB(0, 140, 60)
+        else
+            btn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+        end
+    end
+end
+
+local function setFont(name)
+    for _, entry in ipairs(FONT_LIST) do
+        if entry.Name == name then
+            currentFontName = name
+            currentFontSpec = buildFontSpec(entry)
+            env.w7w7_SelectedFont = name
+            applyFontToAll()
+            refreshFontButtonColors()
+            if FontToggleBtn and FontToggleBtn.Parent then
+                FontToggleBtn.Text = "字體: " .. name
+            end
+            return
+        end
+    end
+end
+
+for i, entry in ipairs(FONT_LIST) do
+    local btn = new("TextButton", FontScroll, {
+        Size = UDim2.new(1, -8, 0, 32),
+        BackgroundColor3 = Color3.fromRGB(50, 50, 50),
+        Text = entry.Name,
+        TextColor3 = Color3.new(1, 1, 1),
+        TextSize = 16,
+        LayoutOrder = i,
+        ZIndex = 21,
+    })
+    new("UICorner", btn, { CornerRadius = UDim.new(0, 6) })
+    applyFont(btn, buildFontSpec(entry))
+    for idx = #trackedTextObjects, 1, -1 do
+        if trackedTextObjects[idx] == btn then
+            table.remove(trackedTextObjects, idx)
+            break
+        end
+    end
+    btn.MouseButton1Click:Connect(function() setFont(entry.Name) end)
+    fontButtons[entry.Name] = btn
+end
+
+refreshFontButtonColors()
+
+local SetGameFontBtn = new("TextButton", FontPanel, {
+    Size = UDim2.new(1, -12, 0, 30),
+    Position = UDim2.new(0, 6, 1, -38),
+    BackgroundColor3 = Color3.fromRGB(90, 60, 160),
+    Text = "設為遊戲字體",
+    TextColor3 = Color3.new(1, 1, 1),
+    TextSize = 13,
+    ZIndex = 21,
+})
+new("UICorner", SetGameFontBtn, { CornerRadius = UDim.new(0, 6) })
+SetGameFontBtn.MouseButton1Click:Connect(function()
+    env.w7w7_GameFont = currentFontName
+    if GameFontEnabled then disableGameFont(); enableGameFont() end
+    if FontToggleBtn and FontToggleBtn.Parent then
+        FontToggleBtn.Text = "字體: " .. currentFontName .. " (遊戲)"
+    end
+end)
+
+local FontToggleBtn = new("TextButton", MainFrame, {
+    Size = UDim2.new(0, 150, 0, 30),
+    Position = UDim2.new(0.5, -75, 0, 355),
+    BackgroundColor3 = Color3.fromRGB(70, 70, 70),
+    Text = "字體: " .. currentFontName,
+    TextColor3 = Color3.new(1, 1, 1),
+    TextSize = 14,
+})
+new("UICorner", FontToggleBtn, { CornerRadius = UDim.new(0, 6) })
+FontToggleBtn.MouseButton1Click:Connect(function()
+    FontPanel.Visible = not FontPanel.Visible
+    if FontPanel.Visible then
+        local mx = MainFrame.AbsolutePosition.X
+        local my = MainFrame.AbsolutePosition.Y
+        FontPanel.Position = UDim2.fromOffset(mx + 330, my)
+    end
+end)
+
+-- ============================================================
+-- Fast Fire / Fast Melee
+-- ============================================================
+local Storage = game:GetService("ReplicatedStorage")
+local ItemsModule = Storage:FindFirstChild("Modules")
+    and Storage.Modules:FindFirstChild("ItemLibrary")
+local itemsTable = nil
+if ItemsModule then
+    local ok, lib = pcall(function() return require(ItemsModule) end)
+    if ok and type(lib) == "table" and type(lib.Items) == "table" then
+        itemsTable = lib.Items
+    end
+end
+
+local GUN_EXCEPTIONS = { Sniper = true, Crossbow = true, Bow = true, RPG = true }
+local GUN_ZERO_PROPS = { "ShootSpread", "ShootAccuracy", "ShootRecoil" }
+local GUN_FAST_PROPS = { "ShootCooldown", "ShootBurstCooldown" }
+local MELEE_PROPS    = { "AttackCooldown", "SwingCooldown", "MeleeCooldown", "Cooldown", "RecoveryTime", "ResetTime" }
+
+local backups = setmetatable({}, { __mode = "k" })
+
+local function isGun(info)
+    return type(info) == "table"
+        and (info.ShootCooldown ~= nil or info.ShootSpread ~= nil or info.ShootRecoil ~= nil)
+end
+local function isMelee(info)
+    if type(info) ~= "table" or isGun(info) then return false end
+    for _, key in ipairs(MELEE_PROPS) do
+        if info[key] ~= nil then return true end
+    end
+    return false
+end
+local function backup(info, key)
+    local saved = backups[info]
+    if not saved then saved = {}; backups[info] = saved end
+    if saved[key] == nil then saved[key] = info[key] end
+end
+local function restoreAll()
+    for info, saved in pairs(backups) do
+        for key, value in pairs(saved) do
+            pcall(function() info[key] = value end)
+        end
+    end
+    table.clear(backups)
+end
+local function applyFastFire()
+    if not FastFireEnabled then restoreAll(); return end
+    if type(itemsTable) ~= "table" then return end
+    for name, info in pairs(itemsTable) do
+        if type(info) == "table" then
+            if isGun(info) and not GUN_EXCEPTIONS[name] then
+                for _, key in ipairs(GUN_ZERO_PROPS) do
+                    if info[key] ~= nil then backup(info, key); info[key] = 0 end
+                end
+                for _, key in ipairs(GUN_FAST_PROPS) do
+                    if info[key] ~= nil then backup(info, key); info[key] = FastFireGunRate end
+                end
+            elseif isMelee(info) then
+                for _, key in ipairs(MELEE_PROPS) do
+                    if info[key] ~= nil then backup(info, key); info[key] = FastFireMeleeRate end
+                end
+            end
+        end
+    end
+end
+
+FastFireBtn.MouseButton1Click:Connect(function()
+    FastFireEnabled = not FastFireEnabled
+    UpdateUI(FastFireBtn, FastFireInd, FastFireEnabled, "Fast Fire")
+    if FastFireEnabled then pcall(applyFastFire) else pcall(restoreAll) end
+end)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    FastFireEnabled = false
+    pcall(restoreAll)
+    if GameFontEnabled then disableGameFont() end
+    sg:Destroy()
+end)
+
+-- [[ 核心功能循環 ]]
+RunService.Heartbeat:Connect(function()
+    if KickEnabled then
+        pcall(function()
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer and p.Character then
+                    local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        hrp.CFrame = TargetPos
+                        hrp.AssemblyLinearVelocity = Vector3.zero
+                    end
+                end
+            end
+            for p in pairs(Projectiles) do
+                if p and p.Parent then
+                    p.CFrame = TargetPos
+                    p.AssemblyLinearVelocity = Vector3.zero
+                else Projectiles[p] = nil end
+            end
+        end)
+    end
+
+    -- TP 黏貼（可調偏移）
+    if TpEnabled and currentTarget and currentTarget.Character then
+        local targetRoot = currentTarget.Character:FindFirstChild("HumanoidRootPart")
+        local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if targetRoot and myRoot then
+            -- 構建偏移 CFrame：先轉目標的朝向
+            local targetCF = targetRoot.CFrame
+            -- 前後（沿目標的 LookVector）、左右（RightVector）、上下（UpVector）
+            local offset = CFrame.new(
+                TpOffset.Right,    -- X（左右）
+                TpOffset.Height,   -- Y（上下）
+                -TpOffset.Forward  -- Z（前後，正 = 目標前方）
+            )
+            myRoot.CFrame = targetCF * offset
+            if TpOffset.KeepVelocityZero then
+                myRoot.AssemblyLinearVelocity = Vector3.zero
+            end
+        end
+    end
+
+    if YLockEnabled then
+        pcall(function()
+            local character = LocalPlayer.Character
+            if character and character:FindFirstChild("HumanoidRootPart") and character:FindFirstChild("Humanoid") then
+                local root = character.HumanoidRootPart
+                local humanoid = character.Humanoid
+                local currentPos = root.Position
+                if not lockedY then lockedY = currentPos.Y - 7 end
+                local moveDir = humanoid.MoveDirection
+                if moveDir.Magnitude > 0 then
+                    local speed = humanoid.WalkSpeed
+                    yLastPos = root.Position + (moveDir * speed * 0.016)
+                    root.CFrame = CFrame.new(yLastPos.X, lockedY, yLastPos.Z) * (root.CFrame - currentPos)
+                else
+                    if not yLastPos then yLastPos = currentPos end
+                    root.CFrame = CFrame.new(yLastPos.X, lockedY, yLastPos.Z) * (root.CFrame - currentPos)
+                end
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.AssemblyAngularVelocity = Vector3.zero
+            else
+                lockedY = nil
+                yLastPos = nil
+            end
+        end)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        if TpEnabled then
+            local plrs = {}
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer then table.insert(plrs, p) end
+            end
+            for _, plr in ipairs(plrs) do
+                if not TpEnabled then break end
+                if plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+                    currentTarget = plr
+                    task.wait(1.5)
+                end
+            end
+        end
+        task.wait(0.5)
+    end
+end)
+
+workspace.ChildAdded:Connect(function(obj)
+    if obj:IsA("BasePart") then
+        task.wait(0.1)
+        if obj.Name == "CoreProjectile" or obj.AssemblyLinearVelocity.Magnitude > 50 then
+            Projectiles[obj] = true
+        end
+    end
+end)
+
+local YText = new("TextLabel", MainFrame, {
+    Size = UDim2.new(1, 0, 0, 30),
+    Position = UDim2.new(0, 0, 0, 390),
+    BackgroundTransparency = 1,
+    TextColor3 = Color3.fromRGB(0, 255, 180),
+    TextSize = 14,
+    Text = "Y: 0",
+})
+
+local vLastPos = nil
+local fakeY = -21827262828
+local currentValue = 2147483647
+local flip = true
+
+VoidBtn.MouseButton1Click:Connect(function()
+    VoidEnabled = not VoidEnabled
+    UpdateUI(VoidBtn, VoidInd, VoidEnabled, "void")
+    if VoidEnabled then
+        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+            vLastPos = LocalPlayer.Character.HumanoidRootPart.CFrame
+        end
+        fakeY = -21827262828
+    else
+        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") and vLastPos then
+            LocalPlayer.Character.HumanoidRootPart.CFrame = vLastPos
+            LocalPlayer.Character.HumanoidRootPart.AssemblyLinearVelocity = Vector3.zero
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        if VoidEnabled then
+            fakeY = fakeY + math.random(1000, 3000)
+            currentValue = currentValue + (fakeY - currentValue) * 0.1
+            YText.Text = "Y: " .. math.floor(currentValue)
+            pcall(function()
+                local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local min, max = 10000000000, 100000000000
+                    local randX = math.random(min, max)
+                    local randY = math.random(min, max)
+                    local randZ = math.random(min, max)
+                    if not flip then randX, randY, randZ = -randX, -randY, -randZ end
+                    flip = not flip
+                    hrp.CFrame = CFrame.new(randX, randY, randZ)
+                    hrp.AssemblyLinearVelocity = Vector3.zero
+                end
+            end)
+        else
+            pcall(function()
+                if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                    YText.Text = "Y: " .. math.floor(LocalPlayer.Character.HumanoidRootPart.Position.Y)
+                end
+            end)
+        end
+        task.wait(0.12)
+    end
+end)
+
+applyFontToAll()
